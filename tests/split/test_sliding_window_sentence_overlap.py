@@ -6,6 +6,7 @@ also leaves room for new content. Punctuation and internal separators count
 toward that budget; outer whitespace may be stripped as in existing chunks.
 Long sentences fall back to character windows. Stride controls character windows
 only; sentence grouping takes precedence over an explicitly configured stride.
+Long-sentence fallback caps stride at chunk_size to preserve content coverage.
 """
 
 import json
@@ -237,6 +238,90 @@ def test_character_windows_use_custom_stride(preserve_boundaries):
     ]
     # Explicit stride 2 determines six shared characters, overriding the default step.
     assert chunks[0].text[-6:] == chunks[1].text[:6]
+
+
+@pytest.mark.parametrize("stride", [8, 20, 64])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "abcdefghijklmnopqrstuvwxy.",
+        "Hi.abcdefghijklmnopqrstuvwxy.Bye.End.",
+        "abcdefghijklmnopqrstuvwxy",
+    ],
+    ids=["long-sentence", "mixed-sentences", "unterminated"],
+)
+def test_long_sentence_fallback_caps_stride_to_preserve_coverage(stride, text):
+    chunker = SlidingWindowChunker(chunk_size=8, overlap=3, stride=stride)
+
+    chunks = chunker.chunk(text)
+
+    _assert_source_coverage(text, chunks, 8)
+    assert "".join(chunk.text for chunk in chunks) == text
+    assert all(not chunk.metadata["has_overlap"] for chunk in chunks)
+    assert chunker.stride == stride
+
+
+def test_fixed_windows_keep_wide_stride_after_long_sentence_fallback():
+    text = "abcdefghijklmnopqrstuvwxy."
+    chunker = SlidingWindowChunker(chunk_size=8, overlap=3, stride=20)
+    chunker.chunk(text)
+
+    chunks = chunker.chunk(text, preserve_boundaries=False)
+
+    assert [(chunk.start_index, chunk.end_index) for chunk in chunks] == [
+        (0, 8),
+        (20, 26),
+    ]
+    assert [chunk.text for chunk in chunks] == [text[:8], text[20:]]
+    assert chunker.stride == 20
+
+
+@pytest.mark.parametrize("overlap", [0, 8], ids=["zero-overlap", "small-overlap"])
+def test_many_short_sentences_do_not_retain_all_offsets(overlap):
+    # Isolate tracing from pytest's own allocations and any existing tracer.
+    # A single large chunk isolates auxiliary memory from output-list growth.
+    script = textwrap.dedent("""
+        import json
+        import sys
+        import tracemalloc
+        from semantica.split.sliding_window_chunker import SlidingWindowChunker
+
+        text = "a." * 50_000
+        chunker = SlidingWindowChunker(chunk_size=len(text), overlap=int(sys.argv[1]))
+        chunker._chunk_with_boundaries("Warmup.")
+        tracemalloc.stop()
+        tracemalloc.start()
+        try:
+            chunks = chunker._chunk_with_boundaries(text)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert len(chunks) == 1
+        assert chunks[0].text == text
+        assert (chunks[0].start_index, chunks[0].end_index) == (0, len(text))
+        print(json.dumps({"peak": peak, "text_length": len(text)}))
+        """)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(overlap)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    measurement = json.loads(result.stdout)
+    # Allow several text copies plus fixed overhead, but not one Python offset
+    # per sentence. Measure peak usage since the queue is freed before return.
+    assert measurement["peak"] < 4 * measurement["text_length"] + 128 * 1024
+
+
+def test_sliding_window_method_covers_long_sentences_with_wide_stride():
+    text = "abcdefghijklmnopqrstuvwxy."
+    chunks = split_sliding_window(text, chunk_size=8, overlap=3, stride=20)
+
+    _assert_source_coverage(text, chunks, 8)
+    assert "".join(chunk.text for chunk in chunks) == text
+    assert all(chunk.metadata["boundary_preserved"] is False for chunk in chunks)
 
 
 @pytest.mark.parametrize("overlap, expected", [(3, [False, False]), (4, [False, True])])

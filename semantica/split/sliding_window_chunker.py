@@ -51,6 +51,7 @@ class SlidingWindowChunker:
                 - stride: Character-window step (default: chunk_size - overlap).
                   Used by fixed windows and long-sentence fallback only; sentence
                   grouping takes precedence over an explicitly configured stride.
+                  Long-sentence fallback caps the step at chunk_size to avoid gaps.
         """
         self.logger = get_logger("sliding_window_chunker")
         self.config = config
@@ -82,7 +83,7 @@ class SlidingWindowChunker:
                 - preserve_boundaries: Group complete sentences (default: True).
                   Repeat only complete trailing sentences that fit the overlap
                   budget and leave room for a new sentence. Sentences longer than
-                  chunk_size fall back to character windows using stride.
+                  chunk_size use character windows with stride capped at chunk_size.
 
         Returns:
             list: List of chunks
@@ -155,7 +156,7 @@ class SlidingWindowChunker:
         return chunks
 
     def _chunk_with_boundaries(self, text: str) -> List[Chunk]:
-        """Scan sentences once, retaining only the current group's starts.
+        """Scan sentences once, retaining only reusable trailing sentence starts.
 
         Overlap repeats complete trailing sentences within the character budget,
         leaving room for new content. Long sentences use character windows.
@@ -163,6 +164,7 @@ class SlidingWindowChunker:
         chunks = []
         sentence_starts = deque()
         cursor = 0
+        group_start = None
         group_end = 0
 
         def append_chunk(start: int, end: int, boundary_preserved: bool) -> None:
@@ -194,32 +196,38 @@ class SlidingWindowChunker:
             if start == end_pos:
                 continue
 
-            if sentence_starts and end_pos - sentence_starts[0] > self.chunk_size:
-                append_chunk(sentence_starts[0], group_end, True)
-                # Drop leading sentences until the suffix fits both the overlap
-                # budget and this new sentence. The capacity condition guarantees
-                # at least one removal, so the next group always moves forward.
+            if group_start is not None and end_pos - group_start > self.chunk_size:
+                append_chunk(group_start, group_end, True)
+                # Candidates already fit the overlap budget. Retain only a suffix
+                # that also leaves room for this new sentence, ensuring progress.
                 while sentence_starts and (
-                    group_end - sentence_starts[0] > self.overlap
-                    or end_pos - sentence_starts[0] > self.chunk_size
+                    end_pos - sentence_starts[0] > self.chunk_size
                 ):
                     sentence_starts.popleft()
+                group_start = sentence_starts[0] if sentence_starts else None
 
             if end_pos - start > self.chunk_size:
-                # A long sentence cannot share a group; retain character stride
-                # and tail behavior, without carrying fragments into later groups.
-                for fragment_start in range(start, end_pos, self.stride):
+                # A long sentence cannot share a group. Cap the step to avoid gaps,
+                # without changing configured stride or carrying partial sentences.
+                step = min(self.stride, self.chunk_size)
+                for fragment_start in range(start, end_pos, step):
                     append_chunk(
                         fragment_start,
                         min(fragment_start + self.chunk_size, end_pos),
                         False,
                     )
             else:
-                sentence_starts.append(start)
+                if group_start is None:
+                    group_start = start
                 group_end = end_pos
+                sentence_starts.append(start)
+                # Discard starts as soon as their suffix cannot be reused. The
+                # group's first offset stays available even when overlap is zero.
+                while sentence_starts and group_end - sentence_starts[0] > self.overlap:
+                    sentence_starts.popleft()
 
-        if sentence_starts:
-            append_chunk(sentence_starts[0], group_end, True)
+        if group_start is not None:
+            append_chunk(group_start, group_end, True)
         return chunks
 
     def chunk_with_overlap(

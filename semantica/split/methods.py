@@ -1624,6 +1624,7 @@ def split_sliding_window(
             trailing sentences when preserve_boundaries is True
         stride: Character-window step (default: chunk_size - overlap). Applies
             to fixed windows and long-sentence fallback, not sentence grouping.
+            Long-sentence fallback caps the step at chunk_size to avoid gaps.
         preserve_boundaries: Group complete sentences and repeat only whole
             trailing sentences that fit both the overlap budget and chunk_size
         **kwargs: Additional options
