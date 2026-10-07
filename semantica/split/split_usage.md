@@ -307,7 +307,7 @@ chunks = structural_chunker.chunk(text)
 # Sliding window chunking
 sliding_chunker = SlidingWindowChunker(
     chunk_size=1000,
-    overlap=200,
+    overlap=200,  # max budget for repeated trailing sentences; actual overlap may be smaller or zero
 )
 chunks = sliding_chunker.chunk(text, preserve_boundaries=True)
 
